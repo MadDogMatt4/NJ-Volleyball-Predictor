@@ -648,15 +648,70 @@ function largestPowerOfTwoAtMost(n){
   return p;
 }
 
-// Standard bracket seed order for a bracket of `size` (a power of two).
-// Produces a properly seeded single-elim bracket: seeds 1 and 2 are in opposite
-// halves (can only meet in the final), 1 and 4 (or 3) in opposite quarters, and
-// each first-round pair sums to size+1 so the top seed always draws the lowest.
-// Built by recursively expanding each seed s into [s, roundSum - s].
+// Base 16-team bracket in the vertical display order the NJSIAA uses: each entry
+// is [hostSeed, nominalOpponent], where the host (seeds 1-8) is the higher seed.
+// Girls volleyball expands the LOW seeds (9-16) into play-in games when a group
+// qualifies more than 16 teams.
+const VB_BASE16 = [
+  [1,16],[8,9],[4,13],[5,12],[2,15],[7,10],[3,14],[6,11]
+];
+
+// Builds the play-in + Round 1 structure for a public volleyball group.
+//   qualifiers = 24  -> seeds 9-16 all become play-ins (8 play-in games)
+//   qualifiers = 20  -> seeds 13-16 become play-ins  (4 play-in games)
+// The low seed s pairs with partner (qualifiers + playInThreshold - s), which the
+// tests confirm matches the published NJSIAA lists (16<->17, 9<->24, 13<->20).
+function buildVolleyballBracket(group, ranked){
+  const qualifiers = bracketSizeFor(group);          // 24, 20, or 16
+  const numPlayIns = Math.max(0, qualifiers - 16);   // 8, 4, or 0
+  const playInThreshold = 17 - numPlayIns;           // low seeds >= this play in
+
+  // seedTeam[s] = ranked entry for seed s (1-based), or null if that seed wasn't filled.
+  const seedTeam = {};
+  for (let s=1;s<=qualifiers;s++) seedTeam[s] = ranked[s-1] || null;
+
+  // Play-in partner for a low seed s: the seeds 17..qualifiers fill in reverse,
+  // pairing the strongest available low seed with the weakest overall seed.
+  // Verified against the NJSIAA lists: 16<->17, 9<->24 (G1); 16<->17, 13<->20 (G2-4).
+  // Partner(s) = qualifiers + (playInThreshold) - s  ... which simplifies per field to:
+  //   G1 (24, thr 9):  partner = 24 + 9 - s = 33 - s   -> 16->17, 9->24 ✓
+  //   G2 (20, thr 13): partner = 20 + 13 - s = 33 - s  -> 16->17, 13->20 ✓
+  const partnerOf = (s) => (qualifiers + playInThreshold - s);
+
+  const playIns = [];   // { a:{seed,entry}, b:{seed,entry}, feedsSeed }
+  const round1  = [];   // { host:{seed,entry}, opp:{seed,entry}|null, fromPlayIn:bool, playInIndex }
+
+  VB_BASE16.forEach(([host, low]) => {
+    if (low >= playInThreshold){
+      const partner = partnerOf(low);
+      const idx = playIns.length;
+      playIns.push({
+        a: { seed: low,     entry: seedTeam[low]     || null },
+        b: { seed: partner, entry: seedTeam[partner] || null },
+        feedsSeed: host
+      });
+      round1.push({
+        host: { seed: host, entry: seedTeam[host] || null },
+        opp: null, fromPlayIn: true, playInIndex: idx
+      });
+    } else {
+      round1.push({
+        host: { seed: host, entry: seedTeam[host] || null },
+        opp:  { seed: low,  entry: seedTeam[low]  || null },
+        fromPlayIn: false
+      });
+    }
+  });
+
+  return { playIns, round1, qualifiers, numPlayIns, qualified: ranked.length, isPublic:true };
+}
+
+// Non-public groups: standard 16-team bracket, standard seed order, byes for
+// any unfilled slots.
 function standardSeedOrder(size){
   let seeds = [1];
   for (let round = 1; (1 << round) <= size; round++){
-    const m = (1 << round);               // bracket size at this round
+    const m = (1 << round);
     const out = [];
     for (const s of seeds){ out.push(s); out.push(m + 1 - s); }
     seeds = out;
@@ -664,46 +719,34 @@ function standardSeedOrder(size){
   return seeds;
 }
 
-// Public volleyball groups are shown as a full 32-team bracket (empty slots = byes).
-// Non-public groups keep a standard 16-team bracket.
-function bracketSlotsFor(group){
-  return NP_GROUPS.includes(group) ? 16 : 32;
-}
-
 function buildBracket(sectionKeyStr, data, games){
   const [section, group] = sectionKeyStr.split('|');
-  const qualifyCount = bracketSizeFor(group);   // how many actually qualify (24/20/16)
-  const slots        = bracketSlotsFor(group);  // bracket display size (32 public, 16 NP)
+  const qualifyCount = bracketSizeFor(group);
 
   const pool = state.teams.filter(t =>
     t.section === section && t.group === group && !t.isOutOfState && data[t.id] && data[t.id].eligible);
-
-  // Only the qualifiers get seeded; everything past qualifyCount is dropped, and
-  // everything past the eligible pool (or past qualifyCount) becomes an empty slot.
   const ranked = rankTeams(pool, data, games).slice(0, qualifyCount);
 
-  // seedEntry[k] = the entry for seed k (1-based), or null if that seed is empty.
-  const seedEntry = {};
-  for (let k=1;k<=slots;k++){
-    seedEntry[k] = (k <= ranked.length) ? ranked[k-1] : null;
+  // Public groups (24 or 20) use the play-in / Round 1 layout.
+  if (!NP_GROUPS.includes(group)){
+    return buildVolleyballBracket(group, ranked);
   }
 
-  // Arrange the `slots` seeds in standard bracket order, then pair top-to-bottom:
-  // position 0 vs 1, 2 vs 3, ... Each pair is one first-round matchup. A pairing
-  // where the opponent is an empty seed is an automatic bye for the real team.
+  // Non-public: standard 16-team bracket with byes for empty slots.
+  const slots = 16;
+  const seedEntry = {};
+  for (let k=1;k<=slots;k++) seedEntry[k] = (k <= ranked.length) ? ranked[k-1] : null;
   const order = standardSeedOrder(slots);
   const round1 = [];
   for (let i=0;i<order.length;i+=2){
-    const seedHi = order[i], seedLo = order[i+1];
     round1.push({
-      high: { seed: seedHi, entry: seedEntry[seedHi] },
-      low:  { seed: seedLo, entry: seedEntry[seedLo] }
+      host: { seed: order[i],   entry: seedEntry[order[i]]   },
+      opp:  { seed: order[i+1], entry: seedEntry[order[i+1]] },
+      fromPlayIn: false
     });
   }
-
-  const byeCount = Object.keys(seedEntry).filter(k => seedEntry[k] === null).length;
-
-  return { round1, slots, qualifyCount, byeCount, qualified: ranked.length };
+  const byeCount = Object.values(seedEntry).filter(v => v === null).length;
+  return { round1, playIns: [], slots, qualifyCount, byeCount, qualified: ranked.length, isPublic:false };
 }
 
 /* ------------------------------ RENDER ---------------------------------- */
@@ -851,8 +894,9 @@ function renderBracket(){
 
   const bk = buildBracket(bracketSection, data, games);
 
-  const slot = (s) => {
-    if (!s.entry) return `<div class="bk-team"><span class="bk-seed">${s.seed}</span><span style="color:var(--chalk-dim);">BYE</span></div>`;
+  // Renders one team line. `s` = { seed, entry }. Empty entry shows as a bye/TBD.
+  const slot = (s, byeLabel) => {
+    if (!s || !s.entry) return `<div class="bk-team"><span class="bk-seed">${s?s.seed:''}</span><span style="color:var(--chalk-dim);">${byeLabel || 'BYE'}</span></div>`;
     const t = s.entry.team, d = s.entry.data;
     return `<div class="bk-team">
       <span class="bk-seed">${s.seed}</span>
@@ -863,6 +907,53 @@ function renderBracket(){
 
   const shortfall = bk.qualifyCount - bk.qualified;
 
+  let body;
+  if (bk.isPublic && bk.numPlayIns > 0){
+    // Two-sided: play-in games on the left, Round 1 (with winner references) on the right.
+    // Play-in games are labeled P1..Pn; each Round 1 host that awaits a winner references its P#.
+    const playInHtml = bk.playIns.map((p, i) => `
+      <div class="bk-matchup">
+        <div style="font-size:10px; color:var(--chalk-dim); font-family:'IBM Plex Mono',monospace; margin-bottom:4px;">Play-in ${i+1}</div>
+        ${slot(p.a)}${slot(p.b)}
+      </div>`).join('');
+
+    const round1Html = bk.round1.map(m => {
+      const oppLine = m.fromPlayIn
+        ? `<div class="bk-team"><span class="bk-seed">&nbsp;</span><span style="color:var(--gold);">winner of Play-in ${m.playInIndex+1}</span></div>`
+        : slot(m.opp);
+      return `<div class="bk-matchup">${slot(m.host)}${oppLine}</div>`;
+    }).join('');
+
+    body = `
+      <div style="display:flex; gap:22px; flex-wrap:wrap; align-items:flex-start;">
+        <div class="bk-col" style="flex:1; min-width:280px;">
+          <div class="bk-col-title">Play-in Games (${bk.playIns.length})</div>
+          ${playInHtml}
+        </div>
+        <div class="bk-col" style="flex:1; min-width:280px;">
+          <div class="bk-col-title">First Round (${bk.round1.length})</div>
+          ${round1Html}
+        </div>
+      </div>`;
+  } else {
+    // Non-public (or a public field that somehow has no play-ins): single column.
+    body = `
+      <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start;">
+        <div class="bk-col" style="flex:1; min-width:300px;">
+          <div class="bk-col-title">First Round (${bk.round1.length} matchups)</div>
+          ${bk.round1.map(m => `<div class="bk-matchup">${slot(m.host)}${slot(m.opp)}</div>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  const explain = bk.isPublic
+    ? `Top ${bk.qualifyCount} eligible teams qualify by PowerPoints. Seeds 1–8 host a Round 1 game;
+       ${bk.numPlayIns > 0
+         ? `the lowest ${bk.numPlayIns*2} seeds meet in ${bk.numPlayIns} play-in game(s), and each winner advances into a Round 1 game against the seed shown.`
+         : `all 16 seeds play in Round 1.`}`
+    : `Top ${bk.qualifyCount} eligible teams by PowerPoints, seeded into a standard 16-team bracket.
+       ${bk.byeCount > 0 ? `Empty slots are byes.` : ''}`;
+
   el.innerHTML = `
     <div class="panel">
       <h2>Section Bracket</h2>
@@ -871,18 +962,9 @@ function renderBracket(){
           <select onchange="bracketSection=this.value; renderBracket();">${opts}</select></div>
       </div>
       ${hasAnyProjected() ? `<p class="proj-note">⚡ This bracket reflects your own predictions.</p>` : ''}
-      <p class="hint">Top ${bk.qualifyCount} eligible teams by PowerPoints qualify, seeded into a
-        standard ${bk.slots}-team bracket (higher seeds only meet higher seeds in later rounds).
-        ${bk.byeCount > 0
-          ? `The ${bk.slots - bk.byeCount} qualifiers fill the top seed lines; the remaining <strong>${bk.byeCount}</strong> slots are byes, so a team drawn against a bye advances automatically.`
-          : `Standard single elimination.`}
-        ${shortfall > 0 ? ` <strong>Only ${bk.qualified} eligible team(s) here — the rest of the qualifying slots are empty.</strong>` : ''}</p>
-      <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start;">
-        <div class="bk-col" style="flex:1; min-width:300px;">
-          <div class="bk-col-title">First Round (${bk.round1.length} matchups)</div>
-          ${bk.round1.map(m => `<div class="bk-matchup">${slot(m.high)}${slot(m.low)}</div>`).join('')}
-        </div>
-      </div>
+      <p class="hint">${explain}
+        ${shortfall > 0 ? ` <strong>Only ${bk.qualified} eligible team(s) here — the remaining qualifying slots are empty.</strong>` : ''}</p>
+      ${body}
     </div>`;
 }
 /* -------------------------------- GAMES ---------------------------------- */
