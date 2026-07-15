@@ -648,37 +648,62 @@ function largestPowerOfTwoAtMost(n){
   return p;
 }
 
+// Standard bracket seed order for a bracket of `size` (a power of two).
+// Produces a properly seeded single-elim bracket: seeds 1 and 2 are in opposite
+// halves (can only meet in the final), 1 and 4 (or 3) in opposite quarters, and
+// each first-round pair sums to size+1 so the top seed always draws the lowest.
+// Built by recursively expanding each seed s into [s, roundSum - s].
+function standardSeedOrder(size){
+  let seeds = [1];
+  for (let round = 1; (1 << round) <= size; round++){
+    const m = (1 << round);               // bracket size at this round
+    const out = [];
+    for (const s of seeds){ out.push(s); out.push(m + 1 - s); }
+    seeds = out;
+  }
+  return seeds;
+}
+
+// Public volleyball groups are shown as a full 32-team bracket (empty slots = byes).
+// Non-public groups keep a standard 16-team bracket.
+function bracketSlotsFor(group){
+  return NP_GROUPS.includes(group) ? 16 : 32;
+}
+
 function buildBracket(sectionKeyStr, data, games){
   const [section, group] = sectionKeyStr.split('|');
-  const fieldSize = bracketSizeFor(group);
+  const qualifyCount = bracketSizeFor(group);   // how many actually qualify (24/20/16)
+  const slots        = bracketSlotsFor(group);  // bracket display size (32 public, 16 NP)
 
   const pool = state.teams.filter(t =>
     t.section === section && t.group === group && !t.isOutOfState && data[t.id] && data[t.id].eligible);
 
-  const ranked = rankTeams(pool, data, games).slice(0, fieldSize);
+  // Only the qualifiers get seeded; everything past qualifyCount is dropped, and
+  // everything past the eligible pool (or past qualifyCount) becomes an empty slot.
+  const ranked = rankTeams(pool, data, games).slice(0, qualifyCount);
 
-  // Seeds 1..fieldSize; any slot beyond the eligible pool is an empty (bye) slot.
-  const seeds = [];
-  for (let i=0;i<fieldSize;i++){
-    seeds.push(ranked[i] ? { seed:i+1, entry:ranked[i] } : { seed:i+1, entry:null });
+  // seedEntry[k] = the entry for seed k (1-based), or null if that seed is empty.
+  const seedEntry = {};
+  for (let k=1;k<=slots;k++){
+    seedEntry[k] = (k <= ranked.length) ? ranked[k-1] : null;
   }
 
-  // How many teams actually play in round 1, and how many top seeds get a bye.
-  const P = largestPowerOfTwoAtMost(fieldSize);
-  const playingR1 = (fieldSize === P) ? fieldSize : 2 * (fieldSize - P);
-  const byeCount  = fieldSize - playingR1;
-
-  // The top `byeCount` seeds skip round 1.
-  const byeSeeds = seeds.slice(0, byeCount);
-
-  // The remaining seeds play, paired highest-vs-lowest within that band.
-  const playSeeds = seeds.slice(byeCount);
+  // Arrange the `slots` seeds in standard bracket order, then pair top-to-bottom:
+  // position 0 vs 1, 2 vs 3, ... Each pair is one first-round matchup. A pairing
+  // where the opponent is an empty seed is an automatic bye for the real team.
+  const order = standardSeedOrder(slots);
   const round1 = [];
-  for (let i=0;i<playSeeds.length/2;i++){
-    round1.push({ high: playSeeds[i], low: playSeeds[playSeeds.length-1-i] });
+  for (let i=0;i<order.length;i+=2){
+    const seedHi = order[i], seedLo = order[i+1];
+    round1.push({
+      high: { seed: seedHi, entry: seedEntry[seedHi] },
+      low:  { seed: seedLo, entry: seedEntry[seedLo] }
+    });
   }
 
-  return { seeds, round1, byeSeeds, byeCount, fieldSize, qualified: ranked.length };
+  const byeCount = Object.keys(seedEntry).filter(k => seedEntry[k] === null).length;
+
+  return { round1, slots, qualifyCount, byeCount, qualified: ranked.length };
 }
 
 /* ------------------------------ RENDER ---------------------------------- */
@@ -836,7 +861,7 @@ function renderBracket(){
       </span></div>`;
   };
 
-  const shortfall = bk.fieldSize - bk.qualified;
+  const shortfall = bk.qualifyCount - bk.qualified;
 
   el.innerHTML = `
     <div class="panel">
@@ -846,19 +871,15 @@ function renderBracket(){
           <select onchange="bracketSection=this.value; renderBracket();">${opts}</select></div>
       </div>
       ${hasAnyProjected() ? `<p class="proj-note">⚡ This bracket reflects your own predictions.</p>` : ''}
-      <p class="hint">Top ${bk.fieldSize} eligible teams by PowerPoints, seeded 1–${bk.fieldSize}.
+      <p class="hint">Top ${bk.qualifyCount} eligible teams by PowerPoints qualify, seeded into a
+        standard ${bk.slots}-team bracket (higher seeds only meet higher seeds in later rounds).
         ${bk.byeCount > 0
-          ? `Because ${bk.fieldSize} isn't a power of two, the top <strong>${bk.byeCount}</strong> seeds receive a first-round bye; seeds ${bk.byeCount+1}–${bk.fieldSize} play the opening round.`
-          : `Standard single elimination (1v${bk.fieldSize}, 2v${bk.fieldSize-1}, …).`}
-        ${shortfall > 0 ? `<strong>Only ${bk.qualified} eligible team(s) in this section — the remaining ${shortfall} slot(s) are byes.</strong>` : ''}</p>
+          ? `The ${bk.slots - bk.byeCount} qualifiers fill the top seed lines; the remaining <strong>${bk.byeCount}</strong> slots are byes, so a team drawn against a bye advances automatically.`
+          : `Standard single elimination.`}
+        ${shortfall > 0 ? ` <strong>Only ${bk.qualified} eligible team(s) here — the rest of the qualifying slots are empty.</strong>` : ''}</p>
       <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start;">
-        ${bk.byeCount > 0 ? `
-        <div class="bk-col" style="flex:1; min-width:250px;">
-          <div class="bk-col-title">Byes to Round 2 (top ${bk.byeCount} seeds)</div>
-          ${bk.byeSeeds.map(s => `<div class="bk-matchup">${slot(s)}</div>`).join('')}
-        </div>` : ''}
-        <div class="bk-col" style="flex:1; min-width:280px;">
-          <div class="bk-col-title">First Round${bk.byeCount>0 ? ` (seeds ${bk.byeCount+1}–${bk.fieldSize})` : ''}</div>
+        <div class="bk-col" style="flex:1; min-width:300px;">
+          <div class="bk-col-title">First Round (${bk.round1.length} matchups)</div>
           ${bk.round1.map(m => `<div class="bk-matchup">${slot(m.high)}${slot(m.low)}</div>`).join('')}
         </div>
       </div>
